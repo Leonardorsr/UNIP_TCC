@@ -1,0 +1,207 @@
+/*
+ * ============================================================
+ * CONTROLE APENAS DO MICRO SERVO (SEM ESTEIRA)
+ * ============================================================
+ * Hardware:
+ *   - Servo SG90 -> Pino 11
+ *
+ * Comandos via Serial:
+ *   'G' ou 'U' : mover servo para 180 graus (uva)
+ *   'C'        : centralizar servo em 115 graus
+ *   'N'        : mover servo para 0 grau
+ *
+ * Utilitarios:
+ *   'I'        : mostrar status
+ *   'M'        : mostrar menu
+ * ============================================================
+ */
+
+#include <Servo.h>
+
+// ============================================================
+// CONFIGURACOES DE HARDWARE
+// ============================================================
+const uint8_t PINO_SERVO = 11;
+
+// Posicoes do servo
+const int ANGULO_CENTRAL = 115;
+const int ANGULO_UVA = 180;
+const int ANGULO_NORMAL = 0;
+
+const int TEMPO_MOVIMENTO_SERVO = 500; // ms
+
+// Protecao anti-spam de comandos
+const unsigned long INTERVALO_MIN_COMANDOS_SERVO = 500; // ms
+
+// ============================================================
+// VARIAVEIS GLOBAIS
+// ============================================================
+Servo meuServo;
+int posicaoServoAtual = ANGULO_CENTRAL;
+unsigned long ultimoComandoServo = 0;
+
+// ============================================================
+// FUNCOES DO SERVO
+// ============================================================
+void moverParaUva() {
+	Serial.println("\n>>> COMANDO: UVA (180 graus) <<<");
+	meuServo.write(ANGULO_UVA);
+	posicaoServoAtual = ANGULO_UVA;
+	delay(TEMPO_MOVIMENTO_SERVO);
+	Serial.println("OK: Servo em 180 graus");
+}
+
+void centralizarServo() {
+	Serial.println("\n>>> COMANDO: CENTRALIZAR (115 graus) <<<");
+	meuServo.write(ANGULO_CENTRAL);
+	posicaoServoAtual = ANGULO_CENTRAL;
+	delay(TEMPO_MOVIMENTO_SERVO);
+	Serial.println("OK: Servo centralizado em 115 graus");
+}
+
+void moverParaNormal() {
+	Serial.println("\n>>> COMANDO: NORMAL (0 grau) <<<");
+	meuServo.write(ANGULO_NORMAL);
+	posicaoServoAtual = ANGULO_NORMAL;
+	delay(TEMPO_MOVIMENTO_SERVO);
+	Serial.println("OK: Servo em 0 grau");
+}
+
+void exibirStatus() {
+	Serial.println();
+	Serial.println(F("===== STATUS SERVO ====="));
+	Serial.print(F("Posicao atual: "));
+	Serial.print(posicaoServoAtual);
+	Serial.println(F(" graus"));
+	Serial.print(F("Ultimo comando: "));
+	Serial.print((millis() - ultimoComandoServo) / 1000.0);
+	Serial.println(F("s atras"));
+	Serial.println(F("========================"));
+	Serial.println();
+}
+
+void exibirMenu() {
+	Serial.println();
+	Serial.println(F("===== MENU SERVO ====="));
+	Serial.println(F("G/U : mover para 180 graus (uva)"));
+	Serial.println(F("C   : centralizar em 115 graus"));
+	Serial.println(F("N   : mover para 0 grau"));
+	Serial.println(F("I   : mostrar status"));
+	Serial.println(F("M   : mostrar menu"));
+	Serial.println(F("======================"));
+	Serial.println();
+}
+
+// ============================================================
+// PROCESSAMENTO DE COMANDOS
+// ============================================================
+void processarComando(char cmd) {
+	unsigned long tempoAtual = millis();
+
+	switch (cmd) {
+		case 'G':
+		case 'g':
+		case 'U':
+		case 'u':
+			if (tempoAtual - ultimoComandoServo < INTERVALO_MIN_COMANDOS_SERVO) {
+				Serial.print(F("Aguarde "));
+				Serial.print((INTERVALO_MIN_COMANDOS_SERVO - (tempoAtual - ultimoComandoServo)) / 1000.0);
+				Serial.println(F("s"));
+				return;
+			}
+			moverParaUva();
+			ultimoComandoServo = tempoAtual;
+			break;
+
+		case 'C':
+		case 'c':
+			if (tempoAtual - ultimoComandoServo < INTERVALO_MIN_COMANDOS_SERVO) {
+				Serial.print(F("Aguarde "));
+				Serial.print((INTERVALO_MIN_COMANDOS_SERVO - (tempoAtual - ultimoComandoServo)) / 1000.0);
+				Serial.println(F("s"));
+				return;
+			}
+			centralizarServo();
+			ultimoComandoServo = tempoAtual;
+			break;
+
+		case 'N':
+		case 'n':
+			if (tempoAtual - ultimoComandoServo < INTERVALO_MIN_COMANDOS_SERVO) {
+				Serial.print(F("Aguarde "));
+				Serial.print((INTERVALO_MIN_COMANDOS_SERVO - (tempoAtual - ultimoComandoServo)) / 1000.0);
+				Serial.println(F("s"));
+				return;
+			}
+			moverParaNormal();
+			ultimoComandoServo = tempoAtual;
+			break;
+
+		case 'I':
+		case 'i':
+			exibirStatus();
+			break;
+
+		case 'M':
+		case 'm':
+			exibirMenu();
+			break;
+
+		default:
+			if (cmd != '\n' && cmd != '\r' && cmd != ' ') {
+				Serial.print(F("Comando desconhecido: "));
+				Serial.println(cmd);
+			}
+			break;
+	}
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+	Serial.begin(9600);
+	delay(1000);
+
+	meuServo.attach(PINO_SERVO);
+	meuServo.write(ANGULO_CENTRAL);
+	posicaoServoAtual = ANGULO_CENTRAL;
+
+	while (Serial.available() > 0) {
+		Serial.read();
+	}
+
+	Serial.println();
+	Serial.println(F("======================================"));
+	Serial.println(F(" SISTEMA SERVO INICIALIZADO"));
+	Serial.println(F("======================================"));
+	Serial.print(F("Servo no pino: "));
+	Serial.println(PINO_SERVO);
+	Serial.print(F("Posicao inicial: "));
+	Serial.print(ANGULO_CENTRAL);
+	Serial.println(F(" graus"));
+	Serial.println(F("Digite M para ver o menu"));
+	Serial.println(F("======================================"));
+	Serial.println();
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+void loop() {
+	if (Serial.available() > 0) {
+		char comando = Serial.read();
+
+		if (comando == '\n' || comando == '\r' || comando == ' ') {
+			return;
+		}
+
+		processarComando(comando);
+
+		while (Serial.available() > 0) {
+			Serial.read();
+		}
+
+		Serial.flush();
+	}
+}
