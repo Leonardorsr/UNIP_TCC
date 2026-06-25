@@ -7,6 +7,120 @@ import keras
 import serial
 import time
 import threading
+import datetime
+
+try:
+    from dotenv import load_dotenv
+    from supabase import create_client
+    supabase_sdk_disponivel = True
+except Exception as e:
+    supabase_sdk_disponivel = False
+    supabase_erro_import = e
+
+BUCKET_NAME = "imagens-uvas"
+supabase = None
+banco_disponivel = False
+
+
+def now() -> str:
+    return datetime.datetime.now().isoformat()
+
+
+def abrir_sessao(lote: str) -> int:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para abrir sessao")
+
+    res = supabase.table("sessao").insert({
+        "data_inicio": now(),
+        "status": "em_andamento",
+        "lote": lote,
+    }).execute()
+
+    return res.data[0]["id_sessao"]
+
+
+def registrar_uva(id_sessao: int) -> int:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para registrar uva")
+
+    res = supabase.table("uva").insert({
+        "id_sessao": id_sessao,
+        "timestamp_entrada": now(),
+        "status_final": None,
+    }).execute()
+
+    return res.data[0]["id_uva"]
+
+
+def salvar_imagem(id_uva: int, url_ou_caminho: str, angulo: int, tipo: str) -> None:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para salvar imagem")
+
+    supabase.table("imagem").insert({
+        "id_uva": id_uva,
+        "caminho_arquivo": url_ou_caminho,
+        "data_hora": now(),
+        "angulo": angulo,
+        "tipo": tipo,
+    }).execute()
+
+
+def salvar_classificacao(id_uva: int, classe_predita: str, confianca: float, modelo_versao: str) -> None:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para salvar classificacao")
+
+    supabase.table("classificacao").insert({
+        "id_uva": id_uva,
+        "classe_predita": classe_predita,
+        "confianca": confianca,
+        "modelo_versao": modelo_versao,
+        "data_hora": now(),
+    }).execute()
+
+
+def salvar_acao_e_fechar_uva(id_uva: int, tipo_acao: str, comando_enviado: str, tempo_execucao: int) -> None:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para salvar acao")
+
+    supabase.table("acao").insert({
+        "id_uva": id_uva,
+        "tipo_acao": tipo_acao,
+        "comando_enviado": comando_enviado,
+        "tempo_execucao": tempo_execucao,
+    }).execute()
+
+    supabase.table("uva").update({
+        "status_final": tipo_acao,
+    }).eq("id_uva", id_uva).execute()
+
+
+def fechar_sessao(id_sessao: int) -> None:
+    if not banco_disponivel or supabase is None:
+        raise RuntimeError("Supabase indisponivel para fechar sessao")
+
+    supabase.table("sessao").update({
+        "data_fim": now(),
+        "status": "concluida",
+    }).eq("id_sessao", id_sessao).execute()
+
+
+if supabase_sdk_disponivel:
+    try:
+        load_dotenv()
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise ValueError("SUPABASE_URL/SUPABASE_KEY ausentes no .env")
+
+        supabase = create_client(supabase_url, supabase_key)
+        banco_disponivel = True
+    except Exception as e:
+        banco_disponivel = False
+        print(f"⚠️  AVISO: Banco Supabase indisponível ({e}). Histórico em nuvem desativado.")
+else:
+    banco_disponivel = False
+    print(f"⚠️  AVISO: Dependências do Supabase indisponíveis ({supabase_erro_import}). Histórico em nuvem desativado.")
 
 # ============================================================
 # CONFIGURAÇÃO ARDUINO/SERVO
@@ -44,6 +158,27 @@ soma_latencia_envio_comando = 0.0
 contador_envios_comando = 0
 
 # ============================================================
+# HISTÓRICO DE SESSÃO (SUPABASE)
+# ============================================================
+id_sessao_banco = None
+historico_nuvem_ativo = False
+contador_registros_banco = 0
+versao_modelo = "classificadorMobileNet.keras"
+
+# Mapeamento do resultado do modelo para os rótulos esperados no banco.
+classe_predita_banco = {
+    0: "boa",
+    1: "ruim",
+    2: "defeito_grave",
+}
+
+tipo_acao_banco = {
+    0: "aprovada",
+    1: "rejeitada",
+    2: "rejeitada",
+}
+
+# ============================================================
 # VARIÁVEIS DE VERIFICAÇÃO TRIPLA DE UVA
 # ============================================================
 contador_deteccoes_uva = 0
@@ -62,8 +197,8 @@ PADDING_COLOR = (127, 127, 127)
 # ============================================================
 CAMERA_ID = 0
 CAMERA_BACKEND = cv2.CAP_DSHOW
-TARGET_WIDTH = 224
-TARGET_HEIGHT = 224
+TARGET_WIDTH = 640
+TARGET_HEIGHT = 360
 TARGET_FPS = 30
 
 
@@ -115,7 +250,10 @@ def enviar_comando_arduino(comando):
 def enviar_comando_arduino_cronometrado(comando, tempo_reconhecimento):
     global soma_latencia_envio_comando, contador_envios_comando
 
+    inicio_envio = time.time()
     sucesso = enviar_comando_arduino(comando)
+    tempo_execucao_ms = int((time.time() - inicio_envio) * 1000)
+
     if sucesso and tempo_reconhecimento is not None:
         latencia_total = time.time() - tempo_reconhecimento
         soma_latencia_envio_comando += latencia_total
@@ -127,7 +265,35 @@ def enviar_comando_arduino_cronometrado(comando, tempo_reconhecimento):
             f"(média: {media_latencia*1000:.1f} ms)"
         )
 
-    return sucesso
+    return sucesso, tempo_execucao_ms
+
+
+def registrar_evento_banco(id_resultado, confianca_percentual, comando_enviado, tempo_execucao_ms):
+    global contador_registros_banco
+
+    if not historico_nuvem_ativo or id_sessao_banco is None:
+        return
+
+    if id_resultado not in classe_predita_banco:
+        return
+
+    try:
+        id_uva = registrar_uva(id_sessao_banco)
+        salvar_classificacao(
+            id_uva=id_uva,
+            classe_predita=classe_predita_banco[id_resultado],
+            confianca=max(0.0, min(1.0, confianca_percentual / 100.0)),
+            modelo_versao=versao_modelo,
+        )
+        salvar_acao_e_fechar_uva(
+            id_uva=id_uva,
+            tipo_acao=tipo_acao_banco[id_resultado],
+            comando_enviado=comando_enviado,
+            tempo_execucao=tempo_execucao_ms,
+        )
+        contador_registros_banco += 1
+    except Exception as e:
+        print(f"⚠️  Falha ao salvar histórico no Supabase: {e}")
 
 def enviar_centralizacao_atrasada():
     time.sleep(delay_centralizacao)
@@ -160,14 +326,26 @@ print("=" * 60)
 print(f"Resolução configurada: {actual_width}x{actual_height}")
 print(f"FPS real: {actual_fps:.2f}")
 if actual_width == TARGET_WIDTH and actual_height == TARGET_HEIGHT:
-    print("✅ Resolução 224x224 ativada!")
+    print("✅ Resolução 640x360 ativada!")
 else:
-    print(f"⚠️  224x224 não disponível, usando {actual_width}x{actual_height}")
+    print(f"⚠️  640x360 não disponível, usando {actual_width}x{actual_height}")
 print("=" * 60)
 
 print("📦 Carregando modelo MobileNet...")
 reconhecedorMobileNet = keras.models.load_model('Classificadores_de_Treino/classificadorMobileNet.keras')
 print("✅ Modelo carregado com sucesso!")
+
+if banco_disponivel:
+    try:
+        lote = input("🧺 Informe o nome do lote (Enter para automático): ").strip()
+        if not lote:
+            lote = f"lote-{time.strftime('%Y%m%d-%H%M%S')}"
+        id_sessao_banco = abrir_sessao(lote)
+        historico_nuvem_ativo = True
+        print(f"☁️  Sessão Supabase iniciada! id_sessao={id_sessao_banco} | lote={lote}")
+    except Exception as e:
+        print(f"⚠️  Não foi possível abrir sessão no Supabase: {e}")
+        historico_nuvem_ativo = False
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -231,6 +409,16 @@ while True:
     roi_array = np.expand_dims(imagem_processada, axis=0)
 
     predicoes = reconhecedorMobileNet.predict(roi_array, verbose=0)[0]
+
+    # Mede intervalo real entre inferencias do modelo (cada frame processado).
+    tempo_inferencia_atual = time.perf_counter()
+    if tempo_ultimo_reconhecimento is not None:
+        intervalo_reconhecimento = tempo_inferencia_atual - tempo_ultimo_reconhecimento
+        if intervalo_reconhecimento > 0:
+            soma_intervalos_reconhecimento += intervalo_reconhecimento
+            contador_intervalos_reconhecimento += 1
+    tempo_ultimo_reconhecimento = tempo_inferencia_atual
+
     if len(predicoes) != 4:
         cv2.putText(imagem_display, "Saida do modelo invalida (esperado 4 classes)",
                     (20, 140), font, 0.8, (0, 0, 255), 2)
@@ -261,11 +449,6 @@ while True:
             ignorar_nada_repetido = id_resultado == 3 and ultima_classe_reconhecida == 3
 
             if not ignorar_nada_repetido:
-                if tempo_ultimo_reconhecimento is not None:
-                    intervalo_reconhecimento = tempo_atual - tempo_ultimo_reconhecimento
-                    soma_intervalos_reconhecimento += intervalo_reconhecimento
-                    contador_intervalos_reconhecimento += 1
-                tempo_ultimo_reconhecimento = tempo_atual
                 ultima_classe_reconhecida = id_resultado
 
             if id_resultado == 0 and arduino_conectado:
@@ -277,11 +460,19 @@ while True:
                         print(f"    🍇 Detecção UVA #{contador_deteccoes_uva}/3 (Conf: {confianca_maxima:.1f}%)")
 
                         if contador_deteccoes_uva >= deteccoes_necessarias_uva:
-                            if enviar_comando_arduino_cronometrado(b'U', tempo_atual):
+                            sucesso_comando, tempo_execucao_ms = enviar_comando_arduino_cronometrado(b'U', tempo_atual)
+                            if sucesso_comando:
                                 contador_comandos_uva += 1
                                 print(f"\n{'='*50}")
                                 print(f"🍇 COMANDO 'U' ENVIADO (UVA → 180°) 🍇")
                                 print(f"{'='*50}")
+
+                                registrar_evento_banco(
+                                    id_resultado=0,
+                                    confianca_percentual=confianca_maxima,
+                                    comando_enviado="U",
+                                    tempo_execucao_ms=tempo_execucao_ms,
+                                )
 
                                 threading.Thread(target=enviar_centralizacao_atrasada, daemon=True).start()
 
@@ -295,7 +486,8 @@ while True:
                     contador_deteccoes_uva = 0
 
                 if tempo_atual - tempo_ultimo_comando >= intervalo_minimo_comandos:
-                    if enviar_comando_arduino_cronometrado(b'N', tempo_atual):
+                    sucesso_comando, tempo_execucao_ms = enviar_comando_arduino_cronometrado(b'N', tempo_atual)
+                    if sucesso_comando:
                         if id_resultado == 1:
                             contador_comandos_uva_ruim += 1
                         else:
@@ -303,6 +495,13 @@ while True:
                         print(f"\n{'='*50}")
                         print(f"❌ COMANDO 'N' ENVIADO ({classes_nomes[id_resultado]} → 0°) ❌")
                         print(f"{'='*50}")
+
+                        registrar_evento_banco(
+                            id_resultado=id_resultado,
+                            confianca_percentual=confianca_maxima,
+                            comando_enviado="N",
+                            tempo_execucao_ms=tempo_execucao_ms,
+                        )
 
                         threading.Thread(target=enviar_centralizacao_atrasada, daemon=True).start()
 
@@ -326,7 +525,7 @@ while True:
     # ============================================================
     # INDICADORES NA TELA
     # ============================================================
-    cv2.putText(imagem_display, f"Entrada camera: {w}x{h} | IA: 224x224", (20, 40), font, 1.0, (255, 255, 255), 2)
+    cv2.putText(imagem_display, "Reconhecimento em tempo real", (20, 40), font, 1.0, (255, 255, 255), 2)
     cv2.putText(imagem_display, "Tecla: Q sair", (20, 70), font, 0.9, (255, 255, 255), 1)
     cv2.putText(imagem_display, "Pipeline: IMAGEM INTEIRA + RESIZE/PADDING", (20, 95), font, 0.9, (0, 255, 255), 1)
     
@@ -375,6 +574,13 @@ if arduino_conectado:
     
     arduino.close()
     print("🔌 Arduino desconectado.")
+
+if historico_nuvem_ativo and id_sessao_banco is not None:
+    try:
+        fechar_sessao(id_sessao_banco)
+        print(f"☁️  Sessão Supabase finalizada. Registros salvos: {contador_registros_banco}")
+    except Exception as e:
+        print(f"⚠️  Falha ao fechar sessão no Supabase: {e}")
 
 print("\n" + "=" * 60)
 print("🏁 SISTEMA ENCERRADO")
